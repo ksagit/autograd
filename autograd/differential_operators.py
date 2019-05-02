@@ -12,7 +12,7 @@ from .extend import primitive, defvjp_argnum, vspace
 
 import autograd.numpy as np
 
-from autograd.builtins import list as ag_list
+from autograd.builtins import list as ag_list, tuple as ag_tuple
 from scipy.special import binom
 
 make_vjp = unary_to_nary(_make_vjp)
@@ -224,8 +224,10 @@ def checkpoint_policy(sequence_length, num_checkpoints):
     else:
         if num_checkpoints < 1:
             raise ValueError("Invalid number of checkpoints")
+        elif num_checkpoints >= sequence_length:
+            return 1
         else:
-            return np.argmin([binomial_loss(y) for y in range(sequence_length)])
+            return (sequence_length - 1) - np.argmin([binomial_loss(y) for y in range(sequence_length)])
 
 def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
     assert(num_checkpoints >= 1)
@@ -243,21 +245,22 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
             l = list(range(len(inputs)))
             l.reverse()
 
-            vjp_f1 = make_vjp(function, 1)
-            vjp_f0 = make_vjp(function, 0)
-            outgrad = vspace(parameters).zeros()
+            # to speed things up without having to call backward_pass
+            curried_function = lambda pc, input: function(pc[0], pc[1], input)
+            curried_vjp = make_vjp(curried_function, 0)
+
+            outgrad_vspace = vspace(parameters)
+            ingrad_vspace = vspace(ingrads[0])
+
+            outgrad = outgrad_vspace.zeros()
 
             for t in l:
                 condition_t = mut_loop_primitive(function, parameters, initial_condition, inputs[:t])
-
-                theta_ingrad_vjp = vjp_f0(parameters, condition_t, inputs[t])[0]
-                state_ingrad_vjp = vjp_f1(parameters, condition_t, inputs[t])[0]
-
-                theta_ingrad = theta_ingrad_vjp(ingrads[t + 1])
-                state_ingrad = state_ingrad_vjp(ingrads[t + 1])
+                ingrad_vjp = curried_vjp(ag_tuple((parameters, condition_t)), inputs[t])[0]
+                theta_ingrad, state_ingrad = ingrad_vjp(ingrads[t + 1])
                 
-                outgrad = vspace(outgrad).add(outgrad, theta_ingrad)
-                ingrads[t] = vspace(ingrads[t]).add(ingrads[t], state_ingrad)
+                outgrad = outgrad_vspace.add(outgrad, theta_ingrad)
+                ingrads[t] = ingrad_vspace.add(ingrads[t], state_ingrad)
             return outgrad, ingrads[0]
         
         def vjp_general(parameters, initial_condition, inputs, ingrads, num_checkpoints):
@@ -276,7 +279,7 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
                 ingrads[y] = state_ingrad
                 theta0_ingrad, state0_ingrad = vjp_general(parameters, initial_condition, inputs[:y], ingrads[:y + 1], num_checkpoints)
                 return vspace(theta_ingrad).add(theta_ingrad, theta0_ingrad), state0_ingrad
-                
+
         return lambda ingrads: vjp_general(parameters, initial_condition, inputs, ingrads, num_checkpoints)[argnum]
     return vjpmaker
             
