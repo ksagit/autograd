@@ -12,6 +12,9 @@ from .extend import primitive, defvjp_argnum, vspace
 
 import autograd.numpy as np
 
+from autograd.builtins import list as ag_list
+from scipy.special import binom
+
 make_vjp = unary_to_nary(_make_vjp)
 make_jvp = unary_to_nary(_make_jvp)
 
@@ -217,6 +220,7 @@ def checkpoint_policy(sequence_length, num_checkpoints):
         if num_checkpoints < 1:
             raise ValueError("Invalid number of checkpoints")
         else:
+            # probably should do some kind of binary search here, but this takes literally no time so it's not a bottleneck for now
             return np.argmin([binomial_loss(y) for y in range(sequence_length)])
 
 def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
@@ -228,8 +232,6 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
         assert(sequence_length == len(inputs))
 
         def vjp_one_checkpoint(parameters, initial_condition, inputs, ingrads):
-            # print("vjp_one_checkpoint called")
-
             assert(len(inputs) > 0)
             assert(len(ingrads) > 0)
             assert(len(inputs) + 1 == len(ingrads))
@@ -257,14 +259,9 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
             return outgrad, ingrads[0]
         
         def vjp_general(parameters, initial_condition, inputs, ingrads, num_checkpoints):
-
             assert(len(inputs) > 0)
             assert(len(ingrads) > 0)
             assert(len(inputs) + 1 == len(ingrads))
-
-            # print("vjp_general called")
-            # print("\t inputs = ", inputs)
-            # print("\t ingrads = ", ingrads)
 
             if num_checkpoints == 1 or len(inputs) == 1:
                 return vjp_one_checkpoint(parameters, initial_condition, inputs, ingrads)
@@ -279,8 +276,6 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
         return lambda ingrads: vjp_general(parameters, initial_condition, inputs, ingrads, num_checkpoints)[argnum]
     return vjpmaker
             
-
-
 def binomial_checkpoint(function, sequence_length, num_checkpoints):
     """
     Args:
@@ -303,5 +298,8 @@ def binomial_checkpoint(function, sequence_length, num_checkpoints):
     wrapped_grad = make_bc_vjpmaker(function, sequence_length, num_checkpoints)
     wrapped = primitive(loop_primitive)
     defvjp_argnum(wrapped, wrapped_grad)
+    return wrapped, loop_primitive
 
-    return wrapped
+
+
+
