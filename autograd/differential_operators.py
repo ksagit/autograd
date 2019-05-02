@@ -200,3 +200,108 @@ def checkpoint(fun):
     wrapped = primitive(fun)
     defvjp_argnum(wrapped, wrapped_grad)
     return wrapped
+
+def powapp_primitive(function, parameters, initial_condition, inputs):
+    condition = initial_condition
+    for input in inputs:
+        condition = function(parameters, condition, input)
+    return condition
+
+def checkpoint_policy(sequence_length, num_checkpoints):
+    def binomial_loss(y):
+        return np.abs(binom(num_checkpoints * sequence_length / (y+1), num_checkpoints) - sequence_length)
+
+    if sequence_length < 2:
+        raise ValueError("Invalid sequence length")
+    else:
+        if num_checkpoints < 1:
+            raise ValueError("Invalid number of checkpoints")
+        else:
+            return np.argmin([binomial_loss(y) for y in range(sequence_length)])
+
+def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
+    assert(num_checkpoints >= 1)
+    assert(sequence_length > 0)
+
+    def vjpmaker(argnum, ans, args, kwargs):
+        parameters, initial_condition, inputs = args
+        assert(sequence_length == len(inputs))
+
+        def vjp_one_checkpoint(parameters, initial_condition, inputs, ingrads):
+            # print("vjp_one_checkpoint called")
+
+            assert(len(inputs) > 0)
+            assert(len(ingrads) > 0)
+            assert(len(inputs) + 1 == len(ingrads))
+
+            l = list(range(len(inputs)))
+            l.reverse()
+
+            vjp_f1 = make_vjp(function, 1)
+            vjp_f0 = make_vjp(function, 0)
+            outgrad = vspace(parameters).zeros()
+
+            for t in l:
+                condition_t = powapp_primitive(function, parameters, initial_condition, inputs[:t])
+
+                theta_ingrad_vjp = vjp_f0(parameters, condition_t, inputs[t])[0]
+                state_ingrad_vjp = vjp_f1(parameters, condition_t, inputs[t])[0]
+
+                theta_ingrad = theta_ingrad_vjp(ingrads[t + 1])
+                state_ingrad = state_ingrad_vjp(ingrads[t + 1])
+
+                # print("\t theta_ingrad, state_ingrad", theta_ingrad, state_ingrad)
+                
+                outgrad = vspace(outgrad).add(outgrad, theta_ingrad)
+                ingrads[t] = vspace(ingrads[t]).add(ingrads[t], state_ingrad)
+            return outgrad, ingrads[0]
+        
+        def vjp_general(parameters, initial_condition, inputs, ingrads, num_checkpoints):
+
+            assert(len(inputs) > 0)
+            assert(len(ingrads) > 0)
+            assert(len(inputs) + 1 == len(ingrads))
+
+            # print("vjp_general called")
+            # print("\t inputs = ", inputs)
+            # print("\t ingrads = ", ingrads)
+
+            if num_checkpoints == 1 or len(inputs) == 1:
+                return vjp_one_checkpoint(parameters, initial_condition, inputs, ingrads)
+            else:
+                y = checkpoint_policy(len(inputs), num_checkpoints)
+                
+                initial_condition_y = powapp_primitive(function, parameters, initial_condition, inputs[:y])
+                theta_ingrad, state_ingrad = vjp_general(parameters, initial_condition_y, inputs[y:], ingrads[y:], num_checkpoints - 1)
+                ingrads[y] = state_ingrad
+                theta0_ingrad, state0_ingrad = vjp_general(parameters, initial_condition, inputs[:y], ingrads[:y + 1], num_checkpoints)
+                return vspace(theta_ingrad).add(theta_ingrad, theta0_ingrad), state0_ingrad
+        return lambda ingrads: vjp_general(parameters, initial_condition, inputs, ingrads, num_checkpoints)[argnum]
+    return vjpmaker
+            
+
+
+def binomial_checkpoint(function, sequence_length, num_checkpoints):
+    """
+    Args:
+        function: takes parameters, condition, and input and produces output. 
+        sequence_length: sequence length
+        num_checkpoints: number of checkpoints we can save
+
+    Returns:
+        wrapped: a new primitive whose gradient, when called, performs the checkpointing algorithm of Gruslys et. al (2016)
+    """
+    def loop_primitive(parameters, initial_condition, inputs):
+        # if len(inputs) != sequence_length:
+        #    raise ValueError("Checkpointed loop called with improper input length")
+
+        conditions = ag_list([initial_condition])  
+        for i, input in enumerate(inputs):
+            conditions += ag_list([function(parameters, conditions[i], input)])
+        return conditions
+
+    wrapped_grad = make_bc_vjpmaker(function, sequence_length, num_checkpoints)
+    wrapped = primitive(loop_primitive)
+    defvjp_argnum(wrapped, wrapped_grad)
+
+    return wrapped
