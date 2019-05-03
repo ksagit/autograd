@@ -24,20 +24,19 @@ A demo of binomial_checkpoint applied to a simple RNN is available in this direc
 
 We can analyze the memory requirements of an LSTM with and without checkpointing by comparing the overhead introduced in each case relative to an identical script with minimized memory requirements. 
 
-First, we can look at the output of top for an uncheckpointed LSTM with sequence length 8. We see Python is
-using about 78M of memory. 
+First, we can look at the output of top for a dummy baseline script that just returns zero for the gradient of the loss function. We see Python is using about 121 mb of memory. 
 ```
 PID   COMMAND      %CPU  TIME     #TH   #WQ  #PORT MEM    PURG   CMPRS  PGRP PPID STATE    
-6129  Python       196.8 00:28.74 2/2   0    15    78M    0B     0B     6129 5987 running  
+8591  Python       134.1 01:29.49 2/1   0    15    121M+  0B     0B     8591 7415 running
 ```
 
-Let's bump up the sequence length to 512 and see what happens. 
+Let's use normal_lstm.py to compute the gradient normally
 ```
 PID   COMMAND      %CPU  TIME     #TH   #WQ  #PORT MEM    PURG   CMPRS  PGRP PPID STATE    
 6136  Python       197.1 00:20.51 2/2   0    15    362M+  0B     0B     6136 5987 running
 ```
 
-As we would expected, the memory demands are a lot higher. The checkpointed script does better. 
+As we would expected, the memory demands are a lot higher. The script checkpointed script does better. 
 ```
 PID   COMMAND      %CPU  TIME     #TH   #WQ  #PORT MEM    PURG   CMPRS  PGRP PPID STATE    
 6140  Python       141.1 00:48.66 2/1   0    15    163M+  0B     0B     6140 5987 running
@@ -45,6 +44,6 @@ PID   COMMAND      %CPU  TIME     #TH   #WQ  #PORT MEM    PURG   CMPRS  PGRP PPI
 
 Per iteration, the checkpointed LSTM takes about 4.60 seconds, while the uncheckpointed LSTM takes 
 about 2.05 seconds. The checkpointed LSTM introduces 85 mb of memory over baseline, while the normal
-LSTM introduces 284 mb of memory. This corresponds to a slowdown of 2.24x, with memory savings of 3.34x.
+LSTM introduces 284 mb of memory. This corresponds to a slowdown of 2.24x, with memory savings of 5.76x.
 
 
