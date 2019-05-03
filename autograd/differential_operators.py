@@ -213,53 +213,25 @@ def mut_loop_primitive(function, parameters, initial_condition, inputs):
         condition = function(parameters, condition, input)
     return condition
 
-# thanks to https://github.com/jrmaddison/tlm_adjoint/blob/master/python/tlm_adjoint/binomial_checkpointing.py for this code
-def checkpoint_policy(n, snapshots):
-    if n < 1:
-        raise ValueError("Require at least one block")
-    if snapshots <= 0:
-        raise ValueError("Require at least one snapshot")
-  
-  # Discard excess snapshots
-    snapshots = max(min(snapshots, n - 1), 1)  
-    # Handle limiting cases
-    if snapshots == 1:
-        return n - 1  # Minimal storage
-    elif snapshots == n - 1:
-        return 1  # Maximal storage
-  
-    t = 2
-    b_s_tm2 = 1
-    b_s_tm1 = snapshots + 1
-    b_s_t = ((snapshots + 1) * (snapshots + 2)) // 2
-    while b_s_tm1 >= n or n > b_s_t:
-        t += 1
-        b_s_tm2, b_s_tm1, b_s_t = b_s_tm1, b_s_t, (b_s_t * (snapshots + t)) // t
-  
-  # Return the maximal step size compatible with Fig. 4 of GW2000
-    b_sm1_tm2 = (b_s_tm2 * snapshots) // (snapshots + t - 2)
-    if n <= b_s_tm1 + b_sm1_tm2:
-        return n - b_s_tm1 + b_s_tm2
-    b_sm1_tm1 = (b_s_tm1 * snapshots) // (snapshots + t - 1)
-    b_sm2_tm1 = (b_sm1_tm1 * (snapshots - 1)) // (snapshots + t - 2)
-    if n <= b_s_tm1 + b_sm2_tm1:
-        return b_s_tm2 + b_sm1_tm2
-    elif n <= b_s_tm1 + b_sm1_tm1 + b_sm2_tm1:
-        return n - b_sm1_tm1 - b_sm2_tm1
+def checkpoint_policy(sequence_length, num_checkpoints):
+    def binomial_loss(y):
+        return np.abs(binom(num_checkpoints * sequence_length / y, num_checkpoints) - sequence_length)
+    if sequence_length < 2:
+        raise ValueError("Invalid sequence length")
     else:
-        return  b_s_tm1
+        if num_checkpoints < 1:
+            raise ValueError("Invalid number of checkpoints")
+        else:
+            return sequence_length - np.argmin([binomial_loss(y + 1) for y in range(sequence_length)])
 
-# @profile
 def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
     assert(num_checkpoints >= 1)
     assert(sequence_length > 0)
 
-    # @profile
     def vjpmaker(argnum, ans, args, kwargs):
         parameters, initial_state, inputs = args
         assert(sequence_length == len(inputs))
 
-        # @profile
         def vjp_one_checkpoint(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad):
             assert(len(inputs) > 0)
             assert(len(visible_state_grads) > 0)
@@ -295,7 +267,6 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
 
             return parameter_grad, ag_tuple((hidden_state_grads[0], visible_state_grads[0]))
         
-        # @profile
         def vjp_general(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad, num_checkpoints):
             assert(len(inputs) > 0)
             assert(len(visible_state_grads) > 0)
@@ -321,11 +292,10 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
         return lambda visible_state_grads: vjp_general(parameters, initial_state, inputs, visible_state_grads, None, num_checkpoints)[argnum]
     return vjpmaker
         
-# @profile
 def binomial_checkpoint(function, sequence_length, num_checkpoints):
     """
     Args:
-        function: takes parameters, condition, and input and produces output. 
+        function: takes parameters, (hidden_state, visible_state), and input and produces (hidden_state, visible_state) 
         sequence_length: sequence length
         num_checkpoints: number of checkpoints we can save
 
@@ -340,7 +310,7 @@ def binomial_checkpoint(function, sequence_length, num_checkpoints):
             state = function(parameters, state, input)
             visible_states += ag_list([state[1]])
         return visible_states
-
+                
     wrapped_grad = make_bc_vjpmaker(function, sequence_length, num_checkpoints)
     wrapped = primitive(loop_primitive)
     defvjp_argnum(wrapped, wrapped_grad)
