@@ -213,76 +213,115 @@ def mut_loop_primitive(function, parameters, initial_condition, inputs):
         condition = function(parameters, condition, input)
     return condition
 
-def checkpoint_policy(sequence_length, num_checkpoints):
-    def binomial_loss(y):
-        return np.abs(sequence_length - binom(
-            num_checkpoints * sequence_length / (y + 1), 
-            num_checkpoints)
-        )
-    if sequence_length < 2:
-        raise ValueError("Invalid sequence length")
+# thanks to https://github.com/jrmaddison/tlm_adjoint/blob/master/python/tlm_adjoint/binomial_checkpointing.py for this code
+def checkpoint_policy(n, snapshots):
+    if n < 1:
+        raise ValueError("Require at least one block")
+    if snapshots <= 0:
+        raise ValueError("Require at least one snapshot")
+  
+  # Discard excess snapshots
+    snapshots = max(min(snapshots, n - 1), 1)  
+    # Handle limiting cases
+    if snapshots == 1:
+        return n - 1  # Minimal storage
+    elif snapshots == n - 1:
+        return 1  # Maximal storage
+  
+    t = 2
+    b_s_tm2 = 1
+    b_s_tm1 = snapshots + 1
+    b_s_t = ((snapshots + 1) * (snapshots + 2)) // 2
+    while b_s_tm1 >= n or n > b_s_t:
+        t += 1
+        b_s_tm2, b_s_tm1, b_s_t = b_s_tm1, b_s_t, (b_s_t * (snapshots + t)) // t
+  
+  # Return the maximal step size compatible with Fig. 4 of GW2000
+    b_sm1_tm2 = (b_s_tm2 * snapshots) // (snapshots + t - 2)
+    if n <= b_s_tm1 + b_sm1_tm2:
+        return n - b_s_tm1 + b_s_tm2
+    b_sm1_tm1 = (b_s_tm1 * snapshots) // (snapshots + t - 1)
+    b_sm2_tm1 = (b_sm1_tm1 * (snapshots - 1)) // (snapshots + t - 2)
+    if n <= b_s_tm1 + b_sm2_tm1:
+        return b_s_tm2 + b_sm1_tm2
+    elif n <= b_s_tm1 + b_sm1_tm1 + b_sm2_tm1:
+        return n - b_sm1_tm1 - b_sm2_tm1
     else:
-        if num_checkpoints < 1:
-            raise ValueError("Invalid number of checkpoints")
-        elif num_checkpoints >= sequence_length:
-            return 1
-        else:
-            return (sequence_length - 1) - np.argmin([binomial_loss(y) for y in range(sequence_length)])
+        return  b_s_tm1
 
+# @profile
 def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
     assert(num_checkpoints >= 1)
     assert(sequence_length > 0)
 
+    # @profile
     def vjpmaker(argnum, ans, args, kwargs):
-        parameters, initial_condition, inputs = args
+        parameters, initial_state, inputs = args
         assert(sequence_length == len(inputs))
 
-        def vjp_one_checkpoint(parameters, initial_condition, inputs, ingrads):
+        # @profile
+        def vjp_one_checkpoint(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad):
             assert(len(inputs) > 0)
-            assert(len(ingrads) > 0)
-            assert(len(inputs) + 1 == len(ingrads))
+            assert(len(visible_state_grads) > 0)
+            assert(len(inputs) + 1 == len(visible_state_grads))
 
             l = list(range(len(inputs)))
             l.reverse()
 
-            # to speed things up without having to call backward_pass
+            visible_state_grad_vspace = vspace(visible_state_grads[0])
+            hidden_state_grad_vspace = vspace(initial_state[0])
+
+            parameter_vspace = vspace(parameters)
+            parameter_grad = parameter_vspace.zeros()
+
+            if hidden_state_grad is None:
+                hidden_state_grad = hidden_state_grad_vspace.zeros()
+                
+            hidden_state_grads = [hidden_state_grad_vspace.zeros()] * len(inputs) + [hidden_state_grad]
+
             curried_function = lambda pc, input: function(pc[0], pc[1], input)
             curried_vjp = make_vjp(curried_function, 0)
-
-            outgrad_vspace = vspace(parameters)
-            ingrad_vspace = vspace(ingrads[0])
-
-            outgrad = outgrad_vspace.zeros()
-
-            for t in l:
-                condition_t = mut_loop_primitive(function, parameters, initial_condition, inputs[:t])
-                ingrad_vjp = curried_vjp(ag_tuple((parameters, condition_t)), inputs[t])[0]
-                theta_ingrad, state_ingrad = ingrad_vjp(ingrads[t + 1])
+            for y in l:
+                state_y = mut_loop_primitive(function, parameters, initial_state, inputs[:y])
                 
-                outgrad = outgrad_vspace.add(outgrad, theta_ingrad)
-                ingrads[t] = ingrad_vspace.add(ingrads[t], state_ingrad)
-            return outgrad, ingrads[0]
+                ingrad_vjp = curried_vjp(ag_tuple((parameters, state_y)), inputs[y])[0]
+                parameter_ingrad, (hidden_state_ingrad, visible_state_ingrad) = ingrad_vjp(
+                    ag_tuple((hidden_state_grads[y + 1], visible_state_grads[y + 1]))
+                )
+                
+                parameter_grad = parameter_vspace.add(parameter_grad, parameter_ingrad)
+                hidden_state_grads[y] = hidden_state_grad_vspace.add(hidden_state_grads[y], hidden_state_ingrad)
+                visible_state_grads[y] = visible_state_grad_vspace.add(visible_state_grads[y], visible_state_ingrad)
+
+            return parameter_grad, ag_tuple((hidden_state_grads[0], visible_state_grads[0]))
         
-        def vjp_general(parameters, initial_condition, inputs, ingrads, num_checkpoints):
+        # @profile
+        def vjp_general(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad, num_checkpoints):
             assert(len(inputs) > 0)
-            assert(len(ingrads) > 0)
-            assert(len(inputs) + 1 == len(ingrads))
+            assert(len(visible_state_grads) > 0)
+            assert(len(inputs) + 1 == len(visible_state_grads))
 
             if num_checkpoints == 1 or len(inputs) == 1:
-                return vjp_one_checkpoint(parameters, initial_condition, inputs, ingrads)
+                return vjp_one_checkpoint(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad)
             else:
                 y = checkpoint_policy(len(inputs), num_checkpoints)
+
+                state_y = mut_loop_primitive(function, parameters, initial_state, inputs[:y])
                 
-                initial_condition_y = mut_loop_primitive(function, parameters, initial_condition, inputs[:y])
-                theta_ingrad, state_ingrad = vjp_general(parameters, initial_condition_y, inputs[y:], ingrads[y:], num_checkpoints - 1)
-
-                ingrads[y] = state_ingrad
-                theta0_ingrad, state0_ingrad = vjp_general(parameters, initial_condition, inputs[:y], ingrads[:y + 1], num_checkpoints)
+                theta_ingrad, (hidden_state_ingrad, visible_state_ingrad) = vjp_general(
+                    parameters, state_y, inputs[y:], visible_state_grads[y:], hidden_state_grad, num_checkpoints - 1
+                )
+                visible_state_grads[y] = visible_state_ingrad
+                
+                theta0_ingrad, state0_ingrad = vjp_general(
+                    parameters, initial_state, inputs[:y], visible_state_grads[:y + 1], hidden_state_ingrad, num_checkpoints
+                )
+                
                 return vspace(theta_ingrad).add(theta_ingrad, theta0_ingrad), state0_ingrad
-
-        return lambda ingrads: vjp_general(parameters, initial_condition, inputs, ingrads, num_checkpoints)[argnum]
+        return lambda visible_state_grads: vjp_general(parameters, initial_state, inputs, visible_state_grads, None, num_checkpoints)[argnum]
     return vjpmaker
-            
+        
+# @profile
 def binomial_checkpoint(function, sequence_length, num_checkpoints):
     """
     Args:
@@ -293,11 +332,14 @@ def binomial_checkpoint(function, sequence_length, num_checkpoints):
     Returns:
         wrapped: a new primitive whose gradient, when called, performs the checkpointing algorithm of Gruslys et. al (2016)
     """
-    def loop_primitive(parameters, initial_condition, inputs):
-        conditions = ag_list([initial_condition])  
+    def loop_primitive(parameters, initial_state, inputs):
+        state = initial_state
+        visible_states = ag_list([state[1]])
+
         for i, input in enumerate(inputs):
-            conditions += ag_list([function(parameters, conditions[i], input)])
-        return conditions
+            state = function(parameters, state, input)
+            visible_states += ag_list([state[1]])
+        return visible_states
 
     wrapped_grad = make_bc_vjpmaker(function, sequence_length, num_checkpoints)
     wrapped = primitive(loop_primitive)
