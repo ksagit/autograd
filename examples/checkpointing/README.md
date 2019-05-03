@@ -14,7 +14,7 @@ The basic RNN in the notebook in this directory is all visible state, because th
 
 The other arguments to binomial_checkpoint are self explanatory — number of checkpoints to save during reverse-mode AD and number of steps in the loop. 
 
-Calling grad on binomial_checkpoint returns a harcoded derivative which performs the checkpointing algorithm of Gruslys et. al (2016). 
+Calling grad on binomial_checkpoint returns a harcoded derivative which performs the checkpointing algorithm of Griewank (2000)
 
 ### RNN Script
 
