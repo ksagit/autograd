@@ -3,7 +3,10 @@ from functools import reduce
 from .tracer import trace, primitive, toposort, Node, Box, isbox, getval
 from .util import func, subval
 
+from time import time
+
 # -------------------- reverse mode --------------------
+
 
 def make_vjp(fun, x):
     start_node = VJPNode.new_root()

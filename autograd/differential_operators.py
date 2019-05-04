@@ -204,7 +204,7 @@ def checkpoint(fun):
     defvjp_argnum(wrapped, wrapped_grad)
     return wrapped
 
-def mut_loop_primitive(function, parameters, initial_condition, inputs):
+def forward_loop_no_saving(function, parameters, initial_condition, inputs):
     """Repeatedly applies function starting at initial_condition without 
     recording intermediate results
     """
@@ -213,6 +213,9 @@ def mut_loop_primitive(function, parameters, initial_condition, inputs):
         condition = function(parameters, condition, input)
     return condition
 
+profile = lambda fun: fun
+
+@profile
 def checkpoint_policy(sequence_length, num_checkpoints):
     def binomial_loss(y):
         return np.abs(binom(num_checkpoints * sequence_length / y, num_checkpoints) - sequence_length)
@@ -224,49 +227,58 @@ def checkpoint_policy(sequence_length, num_checkpoints):
         else:
             return sequence_length - np.argmin([binomial_loss(y + 1) for y in range(sequence_length)])
 
-def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
+@profile
+def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
     assert(num_checkpoints >= 1)
     assert(sequence_length > 0)
 
+    @profile
     def vjpmaker(argnum, ans, args, kwargs):
         parameters, initial_state, inputs = args
         assert(sequence_length == len(inputs))
 
-        def vjp_one_checkpoint(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad):
+        curried_function = lambda param_and_state, input: function(param_and_state[0], param_and_state[1], input)
+        curried_function_vjp = make_vjp(curried_function, 0)
+
+        curried_postprocess = lambda param_and_vis_state: postprocess(param_and_vis_state[0], param_and_vis_state[1])
+        curried_postprocess_vjp = make_vjp(curried_postprocess, 0)
+
+        @profile
+        def vjp_one_checkpoint(parameters, initial_state, inputs, postprocess_grads, hidden_state_grad_wrt_next_state, visible_state_grad_wrt_next_state):
             assert(len(inputs) > 0)
-            assert(len(visible_state_grads) > 0)
-            assert(len(inputs) + 1 == len(visible_state_grads))
+            assert(len(output_grads) > 0)
+            assert(len(inputs) + 1 == len(output_grads))
 
-            l = list(range(len(inputs)))
-            l.reverse()
-
-            visible_state_grad_vspace = vspace(visible_state_grads[0])
             hidden_state_grad_vspace = vspace(initial_state[0])
-
+            visible_state_grad_vspace = vspace(initial_state[1])
             parameter_vspace = vspace(parameters)
+
             parameter_grad = parameter_vspace.zeros()
 
-            if hidden_state_grad is None:
-                hidden_state_grad = hidden_state_grad_vspace.zeros()
+            if hidden_state_grad_wrt_next_state is None:
+                hidden_state_grad_wrt_next_state = hidden_state_grad_vspace.zeros()
+            if visible_state_grad_wrt_next_state is None:
+                visible_state_grad_wrt_next_state = visible_state_grad_vspace.zeros()
                 
-            hidden_state_grads = [hidden_state_grad_vspace.zeros()] * len(inputs) + [hidden_state_grad]
+            for y in range(len(inputs) - 1, -1, -1):
+                state_y = forward_loop_no_saving(function, parameters, initial_state, inputs[:y])
+                
+                state_vjp, (_, visible_state_yplusone) = curried_function_vjp(ag_tuple((parameters, state_y)), inputs[y])
+                postprocess_vjp = curried_postprocess_vjp((parameters, visible_state_yplusone))[0]
 
-            curried_function = lambda pc, input: function(pc[0], pc[1], input)
-            curried_vjp = make_vjp(curried_function, 0)
-            for y in l:
-                state_y = mut_loop_primitive(function, parameters, initial_state, inputs[:y])
-                
-                ingrad_vjp = curried_vjp(ag_tuple((parameters, state_y)), inputs[y])[0]
-                parameter_ingrad, (hidden_state_ingrad, visible_state_ingrad) = ingrad_vjp(
-                    ag_tuple((hidden_state_grads[y + 1], visible_state_grads[y + 1]))
+                parameter_grad_wrt_output, visible_state_grad_wrt_output = postprocess_vjp(postprocess_grads[y])
+                parameter_grad_wrt_next_state, (hidden_state_grad_wrt_next_state, visible_state_grad_wrt_next_state) = state_vjp(
+                    ag_tuple((
+                            hidden_state_grad_wrt_next_state, 
+                            visible_state_grad_vspace.add(visible_state_grad_wrt_output, visible_state_grad_wrt_next_state)
+                        )
+                    )
                 )
-                
-                parameter_grad = parameter_vspace.add(parameter_grad, parameter_ingrad)
-                hidden_state_grads[y] = hidden_state_grad_vspace.add(hidden_state_grads[y], hidden_state_ingrad)
-                visible_state_grads[y] = visible_state_grad_vspace.add(visible_state_grads[y], visible_state_ingrad)
+                parameter_grad = parameter_vspace.add(parameter_grad, parameter_vspace.add(parameter_grad_wrt_output, parameter_grad_wrt_next_state))
 
-            return parameter_grad, ag_tuple((hidden_state_grads[0], visible_state_grads[0]))
+            return parameter_grad, ag_tuple(hidden_state_grad_wrt_next_state, visible_state_grad_wrt_next_state)
         
+        @profile
         def vjp_general(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad, num_checkpoints):
             assert(len(inputs) > 0)
             assert(len(visible_state_grads) > 0)
@@ -277,7 +289,7 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
             else:
                 y = checkpoint_policy(len(inputs), num_checkpoints)
 
-                state_y = mut_loop_primitive(function, parameters, initial_state, inputs[:y])
+                state_y = forward_loop_no_saving(function, parameters, initial_state, inputs[:y])
                 
                 theta_ingrad, (hidden_state_ingrad, visible_state_ingrad) = vjp_general(
                     parameters, state_y, inputs[y:], visible_state_grads[y:], hidden_state_grad, num_checkpoints - 1
@@ -292,7 +304,8 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints):
         return lambda visible_state_grads: vjp_general(parameters, initial_state, inputs, visible_state_grads, None, num_checkpoints)[argnum]
     return vjpmaker
         
-def binomial_checkpoint(function, sequence_length, num_checkpoints):
+@profile
+def binomial_checkpoint(function, sequence_length, num_checkpoints, postprocess=lambda p, x: x):
     """
     Args:
         function: takes parameters, (hidden_state, visible_state), and input and produces (hidden_state, visible_state) 
@@ -302,16 +315,27 @@ def binomial_checkpoint(function, sequence_length, num_checkpoints):
     Returns:
         wrapped: a new primitive whose gradient, when called, performs the checkpointing algorithm of Gruslys et. al (2016)
     """
+
+    """
+    def loop_primitive_mut(parameters, initial_state, inputs):
+        mutstate = {0: initial_state}
+        def mut_propagate(input):
+            mutstate[0] = function(parameters, mutstate[0], input)
+            return mutstate[0][1]
+
+        return [initial_state[1]] + [mut_propagate(input) for input in inputs]
+    """
     def loop_primitive(parameters, initial_state, inputs):
         state = initial_state
-        visible_states = ag_list([state[1]])
+        outputs = ag_list([postprocess(parameters, state[1])])
 
-        for i, input in enumerate(inputs):
-            state = function(parameters, state, input)
-            visible_states += ag_list([state[1]])
-        return visible_states
+        for input in inputs:
+             state = function(parameters, state, input)
+             outputs += ag_list([postprocess(parameters, state[1])])
+
+        return outputs
                 
-    wrapped_grad = make_bc_vjpmaker(function, sequence_length, num_checkpoints)
+    wrapped_grad = make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess)
     wrapped = primitive(loop_primitive)
     defvjp_argnum(wrapped, wrapped_grad)
     return wrapped

@@ -81,7 +81,7 @@ if __name__ == '__main__':
 
     # Learn to predict our own source code.
     text_filename = join(dirname(__file__), 'normal_lstm.py')
-    train_inputs = build_dataset(text_filename, sequence_length=256,
+    train_inputs = build_dataset(text_filename, sequence_length=512,
                                  alphabet_size=num_chars, max_lines=60)
 
     init_params = init_lstm_params(input_size=128, output_size=128,
