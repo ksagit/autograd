@@ -240,43 +240,39 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
         curried_function = lambda param_and_state, input: function(param_and_state[0], param_and_state[1], input)
         curried_function_vjp = make_vjp(curried_function, 0)
 
-        curried_postprocess = lambda param_and_vis_state: postprocess(param_and_vis_state[0], param_and_vis_state[1])
+        curried_postprocess = lambda param_and_state: postprocess(param_and_state[0], param_and_state[1])
         curried_postprocess_vjp = make_vjp(curried_postprocess, 0)
 
         @profile
-        def vjp_one_checkpoint(parameters, initial_state, inputs, postprocess_grads, hidden_state_grad_wrt_next_state, visible_state_grad_wrt_next_state):
+        def vjp_one_checkpoint(parameters, initial_state, inputs, postprocess_grads, state_grad_wrt_next_state):
             assert(len(inputs) > 0)
             assert(len(output_grads) > 0)
             assert(len(inputs) + 1 == len(output_grads))
 
-            hidden_state_grad_vspace = vspace(initial_state[0])
-            visible_state_grad_vspace = vspace(initial_state[1])
+            state_grad_vspace = vspace(initial_state[0])
             parameter_vspace = vspace(parameters)
 
             parameter_grad = parameter_vspace.zeros()
 
-            if hidden_state_grad_wrt_next_state is None:
-                hidden_state_grad_wrt_next_state = hidden_state_grad_vspace.zeros()
-            if visible_state_grad_wrt_next_state is None:
-                visible_state_grad_wrt_next_state = visible_state_grad_vspace.zeros()
+            if state_grad_wrt_next_state is None:
+                state_grad_wrt_next_state = state_grad_vspace.zeros()
                 
             for y in range(len(inputs) - 1, -1, -1):
                 state_y = forward_loop_no_saving(function, parameters, initial_state, inputs[:y])
                 
-                state_vjp, (_, visible_state_yplusone) = curried_function_vjp(ag_tuple((parameters, state_y)), inputs[y])
-                postprocess_vjp = curried_postprocess_vjp((parameters, visible_state_yplusone))[0]
+                state_vjp, state_yplusone = curried_function_vjp(ag_tuple((parameters, state_y)), inputs[y])
+                postprocess_vjp = curried_postprocess_vjp((parameters, state_yplusone))[0]
 
-                parameter_grad_wrt_output, visible_state_grad_wrt_output = postprocess_vjp(postprocess_grads[y])
-                parameter_grad_wrt_next_state, (hidden_state_grad_wrt_next_state, visible_state_grad_wrt_next_state) = state_vjp(
-                    ag_tuple((
-                            hidden_state_grad_wrt_next_state, 
-                            visible_state_grad_vspace.add(visible_state_grad_wrt_output, visible_state_grad_wrt_next_state)
-                        )
-                    )
+                parameter_grad_wrt_output, state_grad_wrt_output = postprocess_vjp(postprocess_grads[y + 1])
+                parameter_grad_wrt_next_state, state_grad_wrt_next_state = state_vjp(
+                            state_grad_vspace.add(state_grad_wrt_output, state_grad_wrt_next_state)
                 )
                 parameter_grad = parameter_vspace.add(parameter_grad, parameter_vspace.add(parameter_grad_wrt_output, parameter_grad_wrt_next_state))
 
-            return parameter_grad, ag_tuple(hidden_state_grad_wrt_next_state, visible_state_grad_wrt_next_state)
+            parameter_grad_wrt_output, state_grad_wrt_output = postprocess_vjp(postprocess_grads[0])
+            parameter_grad = parameter_vspace.add(parameter_grad, parameter_grad_wrt_output)
+    
+            return parameter_grad, state_grad_vspace.add(state_grad_wrt_output, state_grad_wrt_next_state)
         
         @profile
         def vjp_general(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad, num_checkpoints):
