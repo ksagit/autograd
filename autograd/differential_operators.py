@@ -323,11 +323,11 @@ def binomial_checkpoint(function, sequence_length, num_checkpoints, postprocess=
     """
     def loop_primitive(parameters, initial_state, inputs):
         state = initial_state
-        outputs = ag_list([postprocess(parameters, state[1])])
+        outputs = ag_list([postprocess(parameters, state)])
 
         for input in inputs:
              state = function(parameters, state, input)
-             outputs += ag_list([postprocess(parameters, state[1])])
+             outputs += ag_list([postprocess(parameters, state)])
 
         return outputs
                 
