@@ -38,7 +38,7 @@ PID   COMMAND      %CPU  TIME     #TH   #WQ  #PORT MEM    PURG   CMPRS  PGRP PPI
 6136  Python       197.1 00:20.51 2/2   0    15    362M+  0B     0B     6136 5987 running
 ```
 
-As we would expected, the memory demands are a lot higher. The script checkpointed script does better. 
+As we would expected, the memory demands are a lot higher. The checkpointed script does better. 
 ```
 PID   COMMAND      %CPU  TIME     #TH   #WQ  #PORT MEM    PURG   CMPRS  PGRP PPID STATE    
 6140  Python       141.1 00:48.66 2/1   0    15    151M+  0B     0B     6140 5987 running
@@ -46,6 +46,6 @@ PID   COMMAND      %CPU  TIME     #TH   #WQ  #PORT MEM    PURG   CMPRS  PGRP PPI
 
 Per iteration, the checkpointed LSTM takes about 3.30 seconds, while the uncheckpointed LSTM takes 
 about 2.05 seconds. The checkpointed LSTM introduces 85 mb of memory over baseline, while the normal
-LSTM introduces 284 mb of memory. This corresponds to a slowdown of 1.62x, with memory savings of 5.76x.
+LSTM introduces 284 mb of memory. This corresponds to a slowdown of 1.62x, with memory savings of 9.47x.
 
 
