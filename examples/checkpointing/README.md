@@ -1,5 +1,7 @@
 ### How to use binomial_checkpoint
 
+## note: some of the hidden/visible state distinctions are now out of date, will re-document
+
 binomial_checkpoint acccepts a function, a number of loop steps, and a number of checkpoints, and returns an autograd primitive which can be applied to parameters, an initial state, and a sequence of inputs to yield the result of looped computation of the parametrized function over the input starting at the initial state. Specifically, it takes functions of the following signature
 
 `` f(parameters, (hidden_state, visible_state), input) -> (hidden_state, visible_state) ``
