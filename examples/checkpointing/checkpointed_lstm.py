@@ -39,9 +39,12 @@ def init_lstm_params(input_size, state_size, output_size,
             'outgate':      rp(input_size + state_size + 1, state_size),
             'predict':      rp(state_size + 1, output_size)}
 
-def hiddens_to_output_probs(params, hiddens):
-    output = concat_and_multiply(params['predict'], hiddens)
+def hiddens_to_output_probs(params, state):
+    output = concat_and_multiply(params['predict'], state[1])
     return output - logsumexp(output, axis=1, keepdims=True) # Normalize log-probs.
+
+def rp(*shape):
+    return npr.RandomState(0).randn(*shape) * .01
 
 def propagate_state(params, state, input):
     cells, hiddens = state
@@ -57,15 +60,15 @@ def propagate_state(params, state, input):
 
 from autograd import binomial_checkpoint
 
-loop = binomial_checkpoint(propagate_state, 512, 32)
+loop = binomial_checkpoint(propagate_state, 512, 128, hiddens_to_output_probs)
 def lstm_predict(params, inputs):
     num_sequences = inputs.shape[1]
 
-    hiddens = np.repeat(params['init hiddens'], num_sequences, axis=0)
-    cells   = np.repeat(params['init cells'],   num_sequences, axis=0)
+    hiddens = np.repeat(rp(1, 40), num_sequences, axis=0)
+    cells   = np.repeat(rp(1, 40), num_sequences, axis=0)
     initial_state = ag_tuple((hiddens, cells))
     
-    outputs = [hiddens_to_output_probs(params, hiddens) for hiddens in loop(params, initial_state, inputs)]
+    outputs = loop(params, initial_state, inputs)
     return outputs
 
 def lstm_log_likelihood(params, inputs, targets):

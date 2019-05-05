@@ -213,9 +213,7 @@ def forward_loop_no_saving(function, parameters, initial_condition, inputs):
         condition = function(parameters, condition, input)
     return condition
 
-profile = lambda fun: fun
 
-@profile
 def checkpoint_policy(sequence_length, num_checkpoints):
     def binomial_loss(y):
         return np.abs(binom(num_checkpoints * sequence_length / y, num_checkpoints) - sequence_length)
@@ -227,12 +225,10 @@ def checkpoint_policy(sequence_length, num_checkpoints):
         else:
             return sequence_length - np.argmin([binomial_loss(y + 1) for y in range(sequence_length)])
 
-@profile
 def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
     assert(num_checkpoints >= 1)
     assert(sequence_length > 0)
 
-    @profile
     def vjpmaker(argnum, ans, args, kwargs):
         parameters, state_0, inputs = args
         assert(sequence_length == len(inputs))
@@ -246,7 +242,6 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
         curried_postprocess = lambda param_and_state: postprocess(param_and_state[0], param_and_state[1])
         curried_postprocess_vjp = make_vjp(curried_postprocess, 0)
 
-        @profile
         def vjp_one_checkpoint(parameters, state_0, inputs, postprocess_grads, state_grad_wrt_next_state, fst):
             assert(len(inputs) > 0)
             assert(len(postprocess_grads) > 0)
@@ -300,7 +295,6 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
         return lambda postprocess_grads: vjp_general(parameters, state_0, inputs, postprocess_grads, None, num_checkpoints, True)[argnum]
     return vjpmaker
         
-@profile
 def binomial_checkpoint(function, sequence_length, num_checkpoints, postprocess=lambda p, x: x):
     """
     Args:
@@ -311,20 +305,9 @@ def binomial_checkpoint(function, sequence_length, num_checkpoints, postprocess=
     Returns:
         wrapped: a new primitive whose gradient, when called, performs the checkpointing algorithm of Gruslys et. al (2016)
     """
-
-    """
-    def loop_primitive_mut(parameters, initial_state, inputs):
-        mutstate = {0: initial_state}
-        def mut_propagate(input):
-            mutstate[0] = function(parameters, mutstate[0], input)
-            return mutstate[0][1]
-
-        return [initial_state[1]] + [mut_propagate(input) for input in inputs]
-    """
     def loop_primitive(parameters, initial_state, inputs):
         state = initial_state
         outputs = ag_list([postprocess(parameters, state)])
-
         for input in inputs:
              state = function(parameters, state, input)
              outputs += ag_list([postprocess(parameters, state)])
