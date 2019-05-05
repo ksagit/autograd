@@ -234,8 +234,11 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
 
     @profile
     def vjpmaker(argnum, ans, args, kwargs):
-        parameters, initial_state, inputs = args
+        parameters, state_0, inputs = args
         assert(sequence_length == len(inputs))
+
+        state_grad_vspace = vspace(state_0)
+        parameter_vspace = vspace(parameters)
 
         curried_function = lambda param_and_state, input: function(param_and_state[0], param_and_state[1], input)
         curried_function_vjp = make_vjp(curried_function, 0)
@@ -244,60 +247,57 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
         curried_postprocess_vjp = make_vjp(curried_postprocess, 0)
 
         @profile
-        def vjp_one_checkpoint(parameters, initial_state, inputs, postprocess_grads, state_grad_wrt_next_state):
+        def vjp_one_checkpoint(parameters, state_0, inputs, postprocess_grads, state_grad_wrt_next_state, fst):
             assert(len(inputs) > 0)
-            assert(len(output_grads) > 0)
-            assert(len(inputs) + 1 == len(output_grads))
-
-            state_grad_vspace = vspace(initial_state[0])
+            assert(len(postprocess_grads) > 0)
+            assert(len(inputs) + 1 == len(postprocess_grads))
+            
+            state_grad_vspace = vspace(state_0)
             parameter_vspace = vspace(parameters)
 
             parameter_grad = parameter_vspace.zeros()
 
             if state_grad_wrt_next_state is None:
                 state_grad_wrt_next_state = state_grad_vspace.zeros()
-                
+
             for y in range(len(inputs) - 1, -1, -1):
-                state_y = forward_loop_no_saving(function, parameters, initial_state, inputs[:y])
+                state_y = forward_loop_no_saving(function, parameters, state_0, inputs[:y])
                 
                 state_vjp, state_yplusone = curried_function_vjp(ag_tuple((parameters, state_y)), inputs[y])
                 postprocess_vjp = curried_postprocess_vjp((parameters, state_yplusone))[0]
-
+                
                 parameter_grad_wrt_output, state_grad_wrt_output = postprocess_vjp(postprocess_grads[y + 1])
                 parameter_grad_wrt_next_state, state_grad_wrt_next_state = state_vjp(
-                            state_grad_vspace.add(state_grad_wrt_output, state_grad_wrt_next_state)
+                    state_grad_vspace.add(state_grad_wrt_output, state_grad_wrt_next_state)
                 )
+                
                 parameter_grad = parameter_vspace.add(parameter_grad, parameter_vspace.add(parameter_grad_wrt_output, parameter_grad_wrt_next_state))
+                
+            if fst:
+                postprocess_vjp = curried_postprocess_vjp((parameters, state_0))[0]
+                parameter_grad_wrt_output, state_grad_wrt_output = postprocess_vjp(postprocess_grads[0])
+                parameter_grad = parameter_vspace.add(parameter_grad, parameter_grad_wrt_output)
+                state_grad_wrt_next_state = state_grad_vspace.add(state_grad_wrt_output, state_grad_wrt_next_state)        
+            return parameter_grad, state_grad_wrt_next_state
 
-            parameter_grad_wrt_output, state_grad_wrt_output = postprocess_vjp(postprocess_grads[0])
-            parameter_grad = parameter_vspace.add(parameter_grad, parameter_grad_wrt_output)
-    
-            return parameter_grad, state_grad_vspace.add(state_grad_wrt_output, state_grad_wrt_next_state)
-        
-        @profile
-        def vjp_general(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad, num_checkpoints):
+        def vjp_general(parameters, state_0, inputs, postprocess_grads, state_grad_wrt_final_state, num_checkpoints, fst):
             assert(len(inputs) > 0)
-            assert(len(visible_state_grads) > 0)
-            assert(len(inputs) + 1 == len(visible_state_grads))
-
+            assert(len(postprocess_grads) > 0)
+            assert(len(inputs) + 1 == len(postprocess_grads))
+            
             if num_checkpoints == 1 or len(inputs) == 1:
-                return vjp_one_checkpoint(parameters, initial_state, inputs, visible_state_grads, hidden_state_grad)
+                return vjp_one_checkpoint(parameters, state_0, inputs, postprocess_grads, state_grad_wrt_final_state, fst)
             else:
                 y = checkpoint_policy(len(inputs), num_checkpoints)
-
-                state_y = forward_loop_no_saving(function, parameters, initial_state, inputs[:y])
-                
-                theta_ingrad, (hidden_state_ingrad, visible_state_ingrad) = vjp_general(
-                    parameters, state_y, inputs[y:], visible_state_grads[y:], hidden_state_grad, num_checkpoints - 1
+                state_y = forward_loop_no_saving(function, parameters, state_0, inputs[:y])        
+                parameter_grad_wrt_case2, state_grad_wrt_case2 = vjp_general(
+                    parameters, state_y, inputs[y:], postprocess_grads[y:], state_grad_wrt_final_state, num_checkpoints - 1, False
+                )        
+                parameter_grad_wrt_case1, state_grad_wrt_case1 = vjp_general(
+                    parameters, state_0, inputs[:y], postprocess_grads[:y + 1], state_grad_wrt_case2, num_checkpoints, True and fst
                 )
-                visible_state_grads[y] = visible_state_ingrad
-                
-                theta0_ingrad, state0_ingrad = vjp_general(
-                    parameters, initial_state, inputs[:y], visible_state_grads[:y + 1], hidden_state_ingrad, num_checkpoints
-                )
-                
-                return vspace(theta_ingrad).add(theta_ingrad, theta0_ingrad), state0_ingrad
-        return lambda visible_state_grads: vjp_general(parameters, initial_state, inputs, visible_state_grads, None, num_checkpoints)[argnum]
+                return parameter_vspace.add(parameter_grad_wrt_case1, parameter_grad_wrt_case2), state_grad_wrt_case1
+        return lambda postprocess_grads: vjp_general(parameters, state_0, inputs, postprocess_grads, None, num_checkpoints, True)[argnum]
     return vjpmaker
         
 @profile
