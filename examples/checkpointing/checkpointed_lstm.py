@@ -60,7 +60,7 @@ def propagate_state(params, state, input):
 
 from autograd import binomial_checkpoint
 
-loop = binomial_checkpoint(propagate_state, 512, 128, hiddens_to_output_probs)
+loop = binomial_checkpoint(propagate_state, 512, 64, hiddens_to_output_probs)
 def lstm_predict(params, inputs):
     num_sequences = inputs.shape[1]
 
