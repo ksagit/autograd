@@ -217,6 +217,7 @@ def forward_loop_no_saving(function, parameters, initial_condition, inputs):
     return condition
 
 @profile
+# thanks to https://github.com/jrmaddison/tlm_adjoint/blob/master/python/tlm_adjoint/binomial_checkpointing.py
 def checkpoint_policy(n, snapshots):
     if n < 1:
         raise ValueError("Require at least one block")
