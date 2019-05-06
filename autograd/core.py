@@ -7,7 +7,6 @@ from time import time
 
 # -------------------- reverse mode --------------------
 
-
 def make_vjp(fun, x):
     start_node = VJPNode.new_root()
     end_value, end_node =  trace(start_node, fun, x)
@@ -17,9 +16,17 @@ def make_vjp(fun, x):
         def vjp(g): return backward_pass(g, end_node)
     return vjp, end_value
 
+foo = 0
+
+@profile
 def backward_pass(g, end_node):
     outgrads = {end_node : (g, False)}
+
+    
     for node in toposort(end_node):
+        global foo
+        foo += 1
+
         outgrad = outgrads.pop(node)
         ingrads = node.vjp(outgrad[0])
         for parent, ingrad in zip(node.parents, ingrads):

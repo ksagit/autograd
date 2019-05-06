@@ -204,6 +204,9 @@ def checkpoint(fun):
     defvjp_argnum(wrapped, wrapped_grad)
     return wrapped
 
+# profile = lambda fun: fun
+
+@profile
 def forward_loop_no_saving(function, parameters, initial_condition, inputs):
     """Repeatedly applies function starting at initial_condition without 
     recording intermediate results
@@ -213,23 +216,58 @@ def forward_loop_no_saving(function, parameters, initial_condition, inputs):
         condition = function(parameters, condition, input)
     return condition
 
+@profile
+def checkpoint_policy(n, snapshots):
+    if n < 1:
+        raise ValueError("Require at least one block")
+    if snapshots <= 0:
+        raise ValueError("Require at least one snapshot")
 
-def checkpoint_policy(sequence_length, num_checkpoints):
-    def binomial_loss(y):
-        return np.abs(binom(num_checkpoints * sequence_length / y, num_checkpoints) - sequence_length)
-    if sequence_length < 2:
-        raise ValueError("Invalid sequence length")
+  # Discard excess snapshots
+    snapshots = max(min(snapshots, n - 1), 1)  
+    # Handle limiting cases
+    if snapshots == 1:
+        return n - 1  # Minimal storage
+    elif snapshots == n - 1:
+        return 1  # Maximal storage
+
+    t = 2
+    b_s_tm2 = 1
+    b_s_tm1 = snapshots + 1
+    b_s_t = ((snapshots + 1) * (snapshots + 2)) // 2
+    while b_s_tm1 >= n or n > b_s_t:
+        t += 1
+        b_s_tm2, b_s_tm1, b_s_t = b_s_tm1, b_s_t, (b_s_t * (snapshots + t)) // t
+
+  # Return the maximal step size compatible with Fig. 4 of GW2000
+    b_sm1_tm2 = (b_s_tm2 * snapshots) // (snapshots + t - 2)
+    if n <= b_s_tm1 + b_sm1_tm2:
+        return n - b_s_tm1 + b_s_tm2
+    b_sm1_tm1 = (b_s_tm1 * snapshots) // (snapshots + t - 1)
+    b_sm2_tm1 = (b_sm1_tm1 * (snapshots - 1)) // (snapshots + t - 2)
+    if n <= b_s_tm1 + b_sm2_tm1:
+        return b_s_tm2 + b_sm1_tm2
+    elif n <= b_s_tm1 + b_sm1_tm1 + b_sm2_tm1:
+        return n - b_sm1_tm1 - b_sm2_tm1
     else:
         if num_checkpoints < 1:
             raise ValueError("Invalid number of checkpoints")
+        elif num_checkpoints >= sequence_length:
+            return 1
         else:
-            return sequence_length - np.argmin([binomial_loss(y + 1) for y in range(sequence_length)])
+            return (sequence_length - 1) - np.argmin([binomial_loss(y) for y in range(sequence_length)])
+        return  b_s_tm1
 
+@profile
 def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
     assert(num_checkpoints >= 1)
     assert(sequence_length > 0)
 
+    @profile
     def vjpmaker(argnum, ans, args, kwargs):
+        print("called!")
+        print(argnum)
+
         parameters, state_0, inputs = args
         assert(sequence_length == len(inputs))
 
@@ -237,44 +275,45 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
         parameter_vspace = vspace(parameters)
 
         curried_function = lambda param_and_state, input: function(param_and_state[0], param_and_state[1], input)
-        curried_function_vjp = make_vjp(curried_function, 0)
+        curried_function_vjpmaker = make_vjp(curried_function, 0)
 
         curried_postprocess = lambda param_and_state: postprocess(param_and_state[0], param_and_state[1])
-        curried_postprocess_vjp = make_vjp(curried_postprocess, 0)
+        curried_postprocess_vjpmaker = make_vjp(curried_postprocess, 0)
 
+        @profile
         def vjp_one_checkpoint(parameters, state_0, inputs, postprocess_grads, state_grad_wrt_next_state, fst):
             assert(len(inputs) > 0)
             assert(len(postprocess_grads) > 0)
             assert(len(inputs) + 1 == len(postprocess_grads))
             
-            state_grad_vspace = vspace(state_0)
-            parameter_vspace = vspace(parameters)
-
             parameter_grad = parameter_vspace.zeros()
 
             if state_grad_wrt_next_state is None:
                 state_grad_wrt_next_state = state_grad_vspace.zeros()
 
             for y in range(len(inputs) - 1, -1, -1):
+                assert(y == 0)
+
                 state_y = forward_loop_no_saving(function, parameters, state_0, inputs[:y])
+
+                state_vjp, state_yplusone = curried_function_vjpmaker(ag_tuple((parameters, state_y)), inputs[y])
+                postprocess_vjp = curried_postprocess_vjpmaker((parameters, state_yplusone))[0]
                 
-                state_vjp, state_yplusone = curried_function_vjp(ag_tuple((parameters, state_y)), inputs[y])
-                postprocess_vjp = curried_postprocess_vjp((parameters, state_yplusone))[0]
-                
+
                 parameter_grad_wrt_output, state_grad_wrt_output = postprocess_vjp(postprocess_grads[y + 1])
-                parameter_grad_wrt_next_state, state_grad_wrt_next_state = state_vjp(
-                    state_grad_vspace.add(state_grad_wrt_output, state_grad_wrt_next_state)
-                )
+                state_grad_wrt_next_state = state_grad_vspace.add(state_grad_wrt_output, state_grad_wrt_next_state)
+                parameter_grad_wrt_next_state, state_grad_wrt_next_state = state_vjp(state_grad_wrt_next_state)
                 
                 parameter_grad = parameter_vspace.add(parameter_grad, parameter_vspace.add(parameter_grad_wrt_output, parameter_grad_wrt_next_state))
                 
             if fst:
-                postprocess_vjp = curried_postprocess_vjp((parameters, state_0))[0]
+                postprocess_vjp = curried_postprocess_vjpmaker((parameters, state_0))[0]
                 parameter_grad_wrt_output, state_grad_wrt_output = postprocess_vjp(postprocess_grads[0])
                 parameter_grad = parameter_vspace.add(parameter_grad, parameter_grad_wrt_output)
                 state_grad_wrt_next_state = state_grad_vspace.add(state_grad_wrt_output, state_grad_wrt_next_state)        
             return parameter_grad, state_grad_wrt_next_state
 
+        @profile
         def vjp_general(parameters, state_0, inputs, postprocess_grads, state_grad_wrt_final_state, num_checkpoints, fst):
             assert(len(inputs) > 0)
             assert(len(postprocess_grads) > 0)
@@ -294,7 +333,7 @@ def make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess):
                 return parameter_vspace.add(parameter_grad_wrt_case1, parameter_grad_wrt_case2), state_grad_wrt_case1
         return lambda postprocess_grads: vjp_general(parameters, state_0, inputs, postprocess_grads, None, num_checkpoints, True)[argnum]
     return vjpmaker
-        
+
 def binomial_checkpoint(function, sequence_length, num_checkpoints, postprocess=lambda p, x: x):
     """
     Args:
@@ -305,13 +344,22 @@ def binomial_checkpoint(function, sequence_length, num_checkpoints, postprocess=
     Returns:
         wrapped: a new primitive whose gradient, when called, performs the checkpointing algorithm of Gruslys et. al (2016)
     """
+    """
+    def loop_primitive_mut(parameters, initial_state, inputs):
+        mutstate = {0: initial_state}
+        def mut_propagate(input):
+            mutstate[0] = function(parameters, mutstate[0], input)
+            return mutstate[0]
+
+        return [postprocess(parameters, initial_state)] + [postprocess(parameters, mut_propagate(input)) for input in inputs]
+    """
+
     def loop_primitive(parameters, initial_state, inputs):
         state = initial_state
         outputs = ag_list([postprocess(parameters, state)])
         for input in inputs:
              state = function(parameters, state, input)
              outputs += ag_list([postprocess(parameters, state)])
-
         return outputs
                 
     wrapped_grad = make_bc_vjpmaker(function, sequence_length, num_checkpoints, postprocess)
