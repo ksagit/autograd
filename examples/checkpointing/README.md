@@ -1,18 +1,14 @@
 ### How to use binomial_checkpoint
 
-## note: some of the hidden/visible state distinctions are now out of date, will re-document
+binomial_checkpoint acccepts a function, a postprocessing function, a number of loop steps, and a number of checkpoints, and returns an autograd primitive which can be applied to parameters, an initial state, and a sequence of inputs to yield the  postprocessed states resulting from looped computation of the parametrized function over the inputs and starting at the initial state. 
 
-binomial_checkpoint acccepts a function, a number of loop steps, and a number of checkpoints, and returns an autograd primitive which can be applied to parameters, an initial state, and a sequence of inputs to yield the result of looped computation of the parametrized function over the input starting at the initial state. Specifically, it takes functions of the following signature
+It takes functions of the following signature
 
-`` f(parameters, (hidden_state, visible_state), input) -> (hidden_state, visible_state) ``
-
-The state (second argument) is a tuple comprised of two things: the "visible state", which is everything we want to see in the output, and the hidden state, which is the stuff we don't need in the output, but which is necessary to propagate to the next state. For optimal performance, it is important to carefully choose the hidden and visible state. 
+`` f(parameters, state, input) -> state ``
 
 Some examples of different configurations of f are as follows. 
 
-An LSTM requires a hidden and cell state along with input to propagate to the next state. Confusingly, the hidden state in the LSTM is the "visible state" in this setup, because the hidden state is what is used to compute the output probabilities — so we need it in the output. Since the output probabilities are independent of the cell state given the hidden state, the cell state is the "hidden state;" it doesn't appear in the output, but is still represented internally in the loop. 
-
-The basic RNN in the notebook in this directory is all visible state, because the output probabilities are just a function of the full RNN state. To obey the function signature, we just pass a unit given by ``ag_tuple(())`` to the hidden_state field. 
+An LSTM requires a hidden and cell state along with input to propagate to the next state. The output of the LSTM over a sequence of input is given by a sequence of output probabilities, but since the output probabilities are independent of the cell state given the hidden state, we can represent the transformation from hidden state to output probabilities as the postprocessing function and the function f as the LSTM which propagates from `(cell_state, hidden_state)` to `(cell_state, hidden_state)` given an `input`. 
 
 The other arguments to binomial_checkpoint are self explanatory — number of checkpoints to save during reverse-mode AD and number of steps in the loop. 
 
